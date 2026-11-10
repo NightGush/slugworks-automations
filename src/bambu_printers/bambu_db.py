@@ -494,22 +494,17 @@ class BambuDB:
             self.logger.error(f"get_quarterly_usage_totals: {traceback.format_exc()}")
             return {}
 
-    def has_tracked_print(self, printer_name: str, printer_start_time: int):
-        # whether any tracked print (current or unmatched cloud task) exists for
-        # this printer near the given start time - used to detect prints started
-        # directly on the printer that bypassed the cloud-upload pipeline
+    def has_tracked_print(self, printer_name: str, job_id: str):
+        # Match the cloud subtask ID, not bpm's reconnect-derived start time.
         try:
-            window = constants.BAMBU_TIMEOUT
-            lo = printer_start_time - window
-            hi = printer_start_time + window
             if sql(
-                "SELECT 1 FROM prints_current WHERE printer = ? AND start_time BETWEEN ? AND ? LIMIT 1",
-                (printer_name, lo, hi),
+                "SELECT 1 FROM prints_current WHERE printer = ? AND id = ? LIMIT 1",
+                (printer_name, job_id),
             ).fetchone():
                 return True
             if sql(
-                "SELECT 1 FROM prints_unmatched WHERE printer = ? AND start_time BETWEEN ? AND ? LIMIT 1",
-                (printer_name, lo, hi),
+                "SELECT 1 FROM prints_unmatched WHERE printer = ? AND id = ? LIMIT 1",
+                (printer_name, job_id),
             ).fetchone():
                 return True
             return False
