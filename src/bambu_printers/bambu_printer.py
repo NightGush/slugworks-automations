@@ -197,6 +197,15 @@ class Printer:
         self.db.update_printer(self.name, status=constants.PRINTER_IDLE)
         self.logger.warning(f"cancel: {self.name}")
 
+    def refresh(self):
+        # ask the printer for a full status report (read-only) - incremental
+        # reports only carry changed fields, so an unchanged subtask_id (e.g. two
+        # local prints in a row, both "0") never arrives on its own
+        try:
+            self.printer.refresh()
+        except Exception:
+            self.logger.error(f"refresh: {self.name} - {traceback.format_exc()}")
+
     def get_status(self):
         return self.gcode_state
 

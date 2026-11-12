@@ -266,7 +266,10 @@ def check_unauthorized_prints(
         ):
             continue
         if printer.job_id is None:
-            logger.warning(f"manager: Waiting for job identity on {name}")
+            # running printers never go quiet long enough for bpm's watchdog to
+            # pushall, so without this a local print could wait here forever
+            logger.warning(f"manager: Waiting for job identity on {name}, requesting full report")
+            printer.refresh()
             continue
         if printer.start_time <= 0:
             continue
