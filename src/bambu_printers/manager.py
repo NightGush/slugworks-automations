@@ -677,15 +677,13 @@ def reap_stuck_prints(
     # active print, canceling their new prints for concurrency
     for c_print in db.get_current_prints():
         printer = printers.get(c_print[3])
-        if (
-            printer is None
-            or printer.last_update < timestamp - 60
-            or printer.get_status() == constants.GCODE_UNKNOWN
-        ):
+        if printer is None or printer.get_status() == constants.GCODE_UNKNOWN:
             continue
-        # leave it alone if it's the print currently running on the printer
+        # leave it alone if it's the print currently running on the printer - a
+        # stale (offline) printer isn't running anything, so its print gets reaped
         if (
-            printer.get_status() in (constants.GCODE_RUNNING, constants.GCODE_PAUSE)
+            printer.last_update >= timestamp - 60
+            and printer.get_status() in (constants.GCODE_RUNNING, constants.GCODE_PAUSE)
             and (printer.job_id is None or printer.job_id == str(c_print[0]))
         ):
             continue
