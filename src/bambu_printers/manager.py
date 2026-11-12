@@ -256,23 +256,31 @@ def check_unauthorized_prints(
     timestamp: float,
 ):
     # cancel prints started directly from the printer screen to dodge the cloud
-    # pipeline - printer is running but no cloud task exists near its start time
+    # pipeline - printer is running but its job ID has no tracked cloud task.
     for name, printer in printers.items():
+        if printer.last_update < timestamp - 60:
+            continue
         if printer.get_status() not in (
             constants.GCODE_RUNNING,
             constants.GCODE_PAUSE,
         ):
             continue
+        if printer.job_id is None:
+            # running printers never go quiet long enough for bpm's watchdog to
+            # pushall, so without this a local print could wait here forever
+            logger.warning(f"manager: Waiting for job identity on {name}, requesting full report")
+            printer.refresh()
+            continue
         if printer.start_time <= 0:
             continue
         if timestamp - printer.start_time < UNAUTHORIZED_GRACE_SECONDS:
             continue
-        if db.has_tracked_print(name, printer.start_time):
+        if db.has_tracked_print(name, printer.job_id):
             continue
 
         logger.warning(
             f"manager: Unauthorized print on {name} "
-            f"(start_time={printer.start_time}, file={printer.gcode_file!r}) "
+            f"(job_id={printer.job_id!r}, file={printer.gcode_file!r}) "
             "- no cloud task found, canceling"
         )
         try:
@@ -313,8 +321,8 @@ def _print_is_live(printer: bambu_printer.Printer, u_print: tuple) -> bool:
     # only cancel the live print, never a stale one from the backlog
     return (
         printer.get_status() in (constants.GCODE_RUNNING, constants.GCODE_PAUSE)
-        and printer.start_time > 0
-        and abs(printer.start_time - u_print[4]) <= 90
+        and printer.last_update >= time.time() - 60
+        and printer.job_id == str(u_print[0])
     )
 
 
@@ -507,7 +515,7 @@ def check_unmatched_prints(
 
         elif (
             u_print[1] in current_rows
-            and abs(u_print[4] - printers[u_print[1]].start_time) <= 90
+            and _print_is_live(printers[u_print[1]], u_print)
         ):
             current_rows = match_print(current_rows, u_print, db, printers)
 
@@ -591,6 +599,16 @@ def update_printers(
 ):
     for name in printers:
         printer = printers[name]
+        if (
+            printer.last_update < timestamp - 60
+            or printer.get_status() == constants.GCODE_UNKNOWN
+            or (
+                printer.get_status() in (constants.GCODE_RUNNING, constants.GCODE_PAUSE)
+                and printer.job_id is None
+            )
+        ):
+            printer.restart_bpm_object()
+            continue
         running = False
 
         if name in current_prints:
@@ -659,13 +677,14 @@ def reap_stuck_prints(
     # active print, canceling their new prints for concurrency
     for c_print in db.get_current_prints():
         printer = printers.get(c_print[3])
-        if printer is None:
+        if printer is None or printer.get_status() == constants.GCODE_UNKNOWN:
             continue
-        # leave it alone if it's the print currently running on the printer
+        # leave it alone if it's the print currently running on the printer - a
+        # stale (offline) printer isn't running anything, so its print gets reaped
         if (
-            printer.get_status() in (constants.GCODE_RUNNING, constants.GCODE_PAUSE)
-            and printer.start_time > 0
-            and abs(printer.start_time - c_print[6]) <= 90
+            printer.last_update >= timestamp - 60
+            and printer.get_status() in (constants.GCODE_RUNNING, constants.GCODE_PAUSE)
+            and (printer.job_id is None or printer.job_id == str(c_print[0]))
         ):
             continue
         # not running and well past its end time - archive as succeeded (weight stays debited)
@@ -845,13 +864,13 @@ def manager():
                     logger.info("manager: Expiring old forms")
                     expire_old_forms(old_form_rows, db, timestamp)
 
-                # create a list of "current prints" - prints that should be running based on db
-                logger.info("manager: Checking current prints for status changes")
-                current_prints = check_current_prints(db, timestamp)
+                    # Reconcile status only after startup; early MQTT snapshots
+                    # can still describe the previous idle/finished state.
+                    logger.info("manager: Checking current prints for status changes")
+                    current_prints = check_current_prints(db, timestamp)
 
-                # check the printers - update the db based on the status of each print that's actually running
-                logger.info("manager: Updating printers and print statuses")
-                update_printers(printers, current_prints, timestamp, db)
+                    logger.info("manager: Updating printers and print statuses")
+                    update_printers(printers, current_prints, timestamp, db)
 
                 # catch the start-from-printer loophole - skip if the cloud fetch
                 # failed or during the startup grace period
