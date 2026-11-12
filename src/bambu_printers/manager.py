@@ -846,6 +846,16 @@ def manager():
                     )
 
                 if not in_startup_grace:
+                    # Reconcile status only after startup; early MQTT snapshots
+                    # can still describe the previous idle/finished state.
+                    # runs before the reaper so finished/failed prints get archived
+                    # here with the right email, not reaped silently as succeeded
+                    logger.info("manager: Checking current prints for status changes")
+                    current_prints = check_current_prints(db, timestamp)
+
+                    logger.info("manager: Updating printers and print statuses")
+                    update_printers(printers, current_prints, timestamp, db)
+
                     # clear out any prints stuck as current so they don't block new prints
                     logger.info("manager: Reaping stuck prints")
                     reap_stuck_prints(printers, db, timestamp)
@@ -863,14 +873,6 @@ def manager():
                     # expire any forms that were not matched and are older than 10 minutes
                     logger.info("manager: Expiring old forms")
                     expire_old_forms(old_form_rows, db, timestamp)
-
-                    # Reconcile status only after startup; early MQTT snapshots
-                    # can still describe the previous idle/finished state.
-                    logger.info("manager: Checking current prints for status changes")
-                    current_prints = check_current_prints(db, timestamp)
-
-                    logger.info("manager: Updating printers and print statuses")
-                    update_printers(printers, current_prints, timestamp, db)
 
                 # catch the start-from-printer loophole - skip if the cloud fetch
                 # failed or during the startup grace period
