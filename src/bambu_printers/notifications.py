@@ -12,6 +12,8 @@ logger = log.setup_logs(
 SENDER = '"slugwork Baskin Engineering (BE)" <slugwork@ucsc.edu>'
 
 pending_messages = []
+# failed sends are retried once a minute, up to this many tries in total
+MAX_SEND_ATTEMPTS = 5
 
 # human-readable reasons a print was canceled - passed to notify_canceled by the manager
 REASON_BANNED = "your account is banned from using the Bambu printers"
@@ -65,10 +67,22 @@ def send_pending():
             if not result or not result.get("id"):
                 raise RuntimeError("Gmail did not return a message ID")
         except Exception:
-            message["retry_at"] = time.monotonic() + 60
-            logger.error(
-                f"notifications: Will retry '{subject}' to {recipient}: {traceback.format_exc()}"
-            )
+            message["attempts"] = message.get("attempts", 0) + 1
+            if message["attempts"] >= MAX_SEND_ATTEMPTS:
+                # likely a permanent error (bad address etc.) - stop retrying it
+                pending_messages.remove(message)
+                logger.error(
+                    f"notifications: Giving up on '{subject}' to {recipient} after "
+                    f"{message['attempts']} attempts: {traceback.format_exc()}"
+                )
+            else:
+                message["retry_at"] = time.monotonic() + 60
+                logger.error(
+                    f"notifications: Will retry '{subject}' to {recipient}: {traceback.format_exc()}"
+                )
+            # each failed send can block for several seconds of client retries -
+            # if gmail is down the rest would fail too, so try them next loop
+            break
         else:
             pending_messages.remove(message)
             logger.info(f"notifications: Sent '{subject}' to {recipient}")
