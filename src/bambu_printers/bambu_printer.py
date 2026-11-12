@@ -14,6 +14,25 @@ PORT = 8883
 PRINTER_OBJECTS = dict()
 
 
+class JobAwareBambuPrinter(BambuPrinter):
+    job_id = None  # None means no job identity has been received yet.
+
+    def _on_message(self, message):
+        # Preserve the cloud subtask ID, which bpm otherwise discards.
+        status = message.get("print", {})
+        if status.get("gcode_state") in ("IDLE", "FINISH", "FAILED"):
+            self.job_id = None
+        else:
+            if status.get("command") == "project_file" or (
+                "gcode_file" in status and status["gcode_file"] != self.gcode_file
+            ):
+                self.job_id = None
+            if "subtask_id" in status:
+                job_id = status["subtask_id"]
+                self.job_id = None if job_id is None else str(job_id)
+        super()._on_message(message)
+
+
 def get_printer(name: str, serial: str):
     global PRINTER_OBJECTS
 
@@ -48,7 +67,7 @@ class Printer:
             mqtt_username=account.get_username(),
             mqtt_port=PORT,
         )
-        self.printer = BambuPrinter(config=config)
+        self.printer = JobAwareBambuPrinter(config=config)
 
         self.db = get_db()
         if not self.db.get_printer_data(self.name):
@@ -71,6 +90,7 @@ class Printer:
         self.percent_complete = -1
         self.time_remaining = -1
         self.start_time = -1
+        self.job_id = None
         self.active_spool = -1
         self.spool_state = ""
         self.colors = []
@@ -82,7 +102,6 @@ class Printer:
 
     def on_update(self, printer):
         try:
-            self.last_update = int(time.time())
             self.tool_temp = float(printer.tool_temp)
             self.tool_temp_target = float(printer.tool_temp_target)
             self.bed_temp = float(printer.bed_temp)
@@ -112,6 +131,7 @@ class Printer:
             self.percent_complete = int(printer.percent_complete)
             self.time_remaining = int(printer.time_remaining * 60)
             self.start_time = int(printer.start_time * 60)
+            self.job_id = printer.job_id
             self.active_spool = int(printer.active_spool)
             try:
                 self.spool_state = constants.PRINTER_SPOOL_STATES.index(
@@ -126,6 +146,7 @@ class Printer:
                 if s.name or s.type or s.color != "black"
             ]
 
+            self.last_update = int(time.time())
             self.logger.debug(f"on_update: {self.name}")
         except Exception:
             self.logger.error(f"on_update: {self.name} - {traceback.format_exc()}")
@@ -176,6 +197,15 @@ class Printer:
         self.db.update_printer(self.name, status=constants.PRINTER_IDLE)
         self.logger.warning(f"cancel: {self.name}")
 
+    def refresh(self):
+        # ask the printer for a full status report (read-only) - incremental
+        # reports only carry changed fields, so an unchanged subtask_id (e.g. two
+        # local prints in a row, both "0") never arrives on its own
+        try:
+            self.printer.refresh()
+        except Exception:
+            self.logger.error(f"refresh: {self.name} - {traceback.format_exc()}")
+
     def get_status(self):
         return self.gcode_state
 
@@ -201,7 +231,7 @@ class Printer:
                     mqtt_username=account.get_username(),
                     mqtt_port=PORT,
                 )
-                self.printer = BambuPrinter(config=config)
+                self.printer = JobAwareBambuPrinter(config=config)
 
                 self.printer.on_update = self.on_update
                 self.printer.start_session()
